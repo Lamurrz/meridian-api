@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-
+from app.models.schemas import AnomalyEvidenceRequest, AnomalyEvidenceResponse
 from app.db.neo4j import get_session
 from app.models.schemas import AssetSummary, AssetRiskDetail, RiskPath
 
@@ -126,3 +126,126 @@ async def get_asset_risk(asset_id: str):
         active_controls=[r["control_name"] for r in controls_records],
         risk_paths=risk_paths,
     )
+
+@router.post(
+    "/{asset_id}/anomaly-evidence",
+    response_model=AnomalyEvidenceResponse,
+    summary="Submit CyberGraph-AD anomaly evidence to adjust asset risk score",
+)
+async def submit_anomaly_evidence(asset_id: str, evidence: AnomalyEvidenceRequest):
+    """
+    Accept anomaly evidence from CyberGraph-AD and adjust the asset's risk score.
+
+    The adjusted score is computed as:
+      R_adjusted = R_theoretical × (1 + anomaly_weight × max_anomaly_score/10)
+
+    The theoretical score is preserved on the RiskScore node for comparison.
+    """
+    # Fetch current risk score
+    fetch_query = """
+    MATCH (a {asset_id: $asset_id})
+    WHERE a:AIModel OR a:InferenceAPI OR a:TrainingData
+       OR a:MLPipeline OR a:ModelRegistry
+    OPTIONAL MATCH (a)-[:SCORED_BY]->(r:RiskScore)
+    RETURN a.asset_id AS asset_id, a.name AS name,
+           r.score AS theoretical_score, id(r) AS risk_node_id
+    """
+
+    async with get_session() as session:
+        result = await session.run(fetch_query, asset_id=asset_id)
+        records = await result.data()
+
+    if not records:
+        raise HTTPException(status_code=404, detail=f"Asset '{asset_id}' not found")
+
+    record = records[0]
+    theoretical_score = record["theoretical_score"] or 0.0
+
+    # Compute adjusted score
+    adjusted_score = min(
+        theoretical_score * (
+            1 + evidence.anomaly_weight * (evidence.max_anomaly_score / 10.0)
+        ),
+        10.0,
+    )
+    adjusted_score = round(adjusted_score, 3)
+
+    # Update or create RiskScore node with empirical evidence
+    # MERGE handles the case where no RiskScore node exists yet
+    update_query = """
+    MATCH (a {asset_id: $asset_id})
+    MERGE (a)-[:SCORED_BY]->(r:RiskScore {asset_id: $asset_id})
+    ON CREATE SET r.score = 0.0
+    SET r.adjusted_score        = $adjusted_score,
+        r.max_anomaly_score     = $max_anomaly_score,
+        r.anomaly_types         = $anomaly_types,
+        r.anomaly_finding_count = $finding_count,
+        r.anomaly_observed_at   = $observed_at,
+        r.anomaly_weight        = $anomaly_weight
+    RETURN r.adjusted_score AS adjusted_score
+    """
+
+    async with get_session() as session:
+        result = await session.run(
+            update_query,
+            asset_id=asset_id,
+            adjusted_score=adjusted_score,
+            max_anomaly_score=evidence.max_anomaly_score,
+            anomaly_types=evidence.anomaly_types,
+            finding_count=evidence.finding_count,
+            observed_at=evidence.observed_at,
+            anomaly_weight=evidence.anomaly_weight,
+        )
+        await result.data()
+
+    return AnomalyEvidenceResponse(
+        asset_id=asset_id,
+        theoretical_risk_score=round(theoretical_score, 3),
+        adjusted_risk_score=adjusted_score,
+        max_anomaly_score=evidence.max_anomaly_score,
+        anomaly_types=evidence.anomaly_types,
+        finding_count=evidence.finding_count,
+        risk_increase=round(adjusted_score - theoretical_score, 3),
+    )
+
+
+# ── Also add GET endpoint to retrieve anomaly evidence history ────────────────
+
+@router.get(
+    "/{asset_id}/anomaly-evidence",
+    summary="Retrieve current anomaly evidence for an asset",
+)
+async def get_anomaly_evidence(asset_id: str):
+    """
+    Return the current anomaly evidence stored against an asset's risk score.
+    """
+    query = """
+    MATCH (a {asset_id: $asset_id})-[:SCORED_BY]->(r:RiskScore)
+    RETURN
+        r.score                 AS theoretical_score,
+        r.adjusted_score        AS adjusted_score,
+        r.max_anomaly_score     AS max_anomaly_score,
+        r.anomaly_types         AS anomaly_types,
+        r.anomaly_finding_count AS finding_count,
+        r.anomaly_observed_at   AS observed_at,
+        r.anomaly_weight        AS anomaly_weight
+    """
+    async with get_session() as session:
+        result = await session.run(query, asset_id=asset_id)
+        records = await result.data()
+
+    if not records:
+        raise HTTPException(status_code=404, detail=f"Asset '{asset_id}' not found")
+
+    r = records[0]
+    return {
+        "asset_id": asset_id,
+        "theoretical_risk_score": r["theoretical_score"],
+        "adjusted_risk_score": r["adjusted_score"],
+        "max_anomaly_score": r["max_anomaly_score"],
+        "anomaly_types": r["anomaly_types"] or [],
+        "finding_count": r["finding_count"],
+        "observed_at": r["observed_at"],
+        "has_anomaly_evidence": r["adjusted_score"] is not None,
+    }
+

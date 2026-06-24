@@ -1,5 +1,7 @@
 ﻿from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime, timezone
 
 
 class HealthResponse(BaseModel):
@@ -100,3 +102,60 @@ class ControlGap(BaseModel):
 class ControlGapsResponse(BaseModel):
     total_gaps: int
     gaps: list[ControlGap]
+"""
+Two Pydantic models for the anomaly evidence endpoint.
+"""
+
+class AnomalyEvidenceRequest(BaseModel):
+    """
+    Anomaly evidence payload from CyberGraph-AD.
+    POSTed to /assets/{asset_id}/anomaly-evidence by meridian_bridge.py.
+    """
+    max_anomaly_score: float = Field(
+        ...,
+        ge=0.0,
+        le=10.0,
+        description="Highest normalized anomaly score (0-10) across all findings for this asset",
+    )
+    anomaly_types: list[str] = Field(
+        default_factory=list,
+        description="Anomaly types observed (e.g. brute_force, lateral_movement)",
+    )
+    finding_count: int = Field(
+        default=1,
+        ge=1,
+        description="Number of CyberGraph-AD findings implicating this asset",
+    )
+    adjusted_risk_score: Optional[float] = Field(
+        default=None,
+        description="Pre-computed adjusted score from bridge (optional — Meridian will recompute)",
+    )
+    anomaly_weight: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Weight of anomaly evidence in risk adjustment (0=ignore, 1=double at max score)",
+    )
+    observed_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(),
+        description="ISO-8601 timestamp when anomaly was observed",
+    )
+
+
+class AnomalyEvidenceResponse(BaseModel):
+    """
+    Response from /assets/{asset_id}/anomaly-evidence POST.
+    """
+    asset_id: str
+    theoretical_risk_score: float = Field(
+        description="Original Meridian risk score from threat intelligence",
+    )
+    adjusted_risk_score: float = Field(
+        description="Empirically adjusted risk score after anomaly evidence",
+    )
+    max_anomaly_score: float
+    anomaly_types: list[str]
+    finding_count: int
+    risk_increase: float = Field(
+        description="Absolute increase in risk score (adjusted - theoretical)",
+    )
