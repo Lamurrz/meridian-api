@@ -55,13 +55,14 @@ import httpx
 logger = logging.getLogger("meridian.bridge")
 
 # Anomaly type → likely ATT&CK/ATLAS technique prefixes
+# Includes both ATT&CK (T####) and ATLAS (AML.T####) technique IDs
 ANOMALY_TO_TECHNIQUES: dict[str, list[str]] = {
-    "brute_force":        ["T1110", "T1110.001", "AML.T0051"],
-    "credential_stuffing": ["T1110.004", "T1110.003", "AML.T0051"],
-    "lateral_movement":   ["T1021", "T1021.001", "T1021.002", "AML.T0035"],
-    "data_exfiltration":  ["T1530", "T1537", "T1567", "AML.T0024"],
-    "privilege_escalation": ["T1078", "T1078.002", "T1068"],
-    "off_hours_access":   ["T1133", "T1078", "AML.T0051"],
+    "brute_force":         ["T1110", "T1110.001", "AML.T0051", "AML.T0005"],
+    "credential_stuffing": ["T1110.004", "T1110.003", "AML.T0051", "AML.T0005"],
+    "lateral_movement":    ["T1021", "T1021.001", "T1021.002", "AML.T0035", "AML.T0043"],
+    "data_exfiltration":   ["T1530", "T1537", "T1567", "AML.T0024", "AML.T0020"],
+    "privilege_escalation": ["T1078", "T1078.002", "T1068", "AML.T0005", "AML.T0043"],
+    "off_hours_access":    ["T1133", "T1078", "AML.T0051", "AML.T0005", "AML.T0043"],
 }
 
 # Anomaly type → asset types most likely targeted
@@ -330,9 +331,15 @@ class MeridianBridge:
             enriched_finding["unmapped"]["implicated_asset_ids"] = implicated_assets
 
             if ttp_context:
+                # Deduplicate technique IDs across all assets for the note
+                seen_tids = []
+                for t in ttp_context:
+                    tid = t.get("technique_id", "")
+                    if tid and tid not in seen_tids:
+                        seen_tids.append(tid)
                 enriched_finding["unmapped"]["enrichment_note"] = (
                     f"{anomaly_type} consistent with: "
-                    + ", ".join(t.get("technique_id", "") for t in ttp_context[:3])
+                    + ", ".join(seen_tids[:3])
                 )
 
             enriched.append(enriched_finding)
@@ -359,10 +366,13 @@ class MeridianBridge:
                 resp = await client.get(f"{self._meridian}/assets/{asset_id}/risk")
                 resp.raise_for_status()
                 data = resp.json()
-                return [
-                    {"technique_id": tid, "asset_id": asset_id}
-                    for tid in data.get("top_techniques", [])
-                ]
+                seen = set()
+                ttps = []
+                for tid in data.get("top_techniques", []):
+                    if tid not in seen:
+                        seen.add(tid)
+                        ttps.append({"technique_id": tid, "asset_id": asset_id})
+                return ttps
         except Exception as exc:
             logger.debug(f"Could not fetch techniques for {asset_id}: {exc}")
             return []
