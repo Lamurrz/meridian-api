@@ -1,4 +1,4 @@
-﻿from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from neo4j import AsyncGraphDatabase, AsyncDriver

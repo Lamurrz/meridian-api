@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter
+from fastapi import APIRouter
 
 from app.db.neo4j import get_session
 from app.models.schemas import ControlGap, ControlGapsResponse
